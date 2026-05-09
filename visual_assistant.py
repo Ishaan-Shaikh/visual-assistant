@@ -1,250 +1,66 @@
-import os
+"""
+visual_assistant.py
+-------------------
+Main entry point for the Visual Assistant.
+
+Usage:
+  # Cloud backend (Groq API, fast, needs API key)
+  python visual_assistant.py --backend groq
+
+  # Local backend (LLaVA-1.5-7b, offline, needs GPU)
+  python visual_assistant.py --backend local
+
+  # Change TTS engine
+  python visual_assistant.py --backend groq --tts gtts
+
+  # Describe an image file instead of the screen
+  python visual_assistant.py --backend groq --image photo.jpg
+
+  # Run latency benchmark
+  python visual_assistant.py --backend local --benchmark --image-dir ./images
+"""
+
+import argparse
+import sys
+import threading
 import time
-import base64
-import mss
-import subprocess
-import wave
-import tempfile
-from piper.voice import PiperVoice
-from PIL import Image
-from groq import Groq
-from dotenv import load_dotenv
-import io
 
-import re
-
-def clean_text(text):
-    """Remove markdown formatting and fix punctuation for natural TTS."""
-    # remove bold and italic markers
-    text = re.sub(r'\*{1,3}(.*?)\*{1,3}', r'\1', text)
-    # remove headers
-    text = re.sub(r'#{1,6}\s*', '', text)
-    # remove inline code backticks
-    text = re.sub(r'`([^`]*)`', r'\1', text)
-    # remove triple backtick code blocks entirely
-    text = re.sub(r'```.*?```', 'code block', text, flags=re.DOTALL)
-    # remove URLs
-    text = re.sub(r'http\S+', '', text)
-    # remove bullet points
-    text = re.sub(r'^\s*[-*•]\s+', '', text, flags=re.MULTILINE)
-    # replace multiple spaces
-    text = re.sub(r' +', ' ', text)
-    # replace long pauses at full stops — add comma instead for shorter pause
-    text = re.sub(r'\.(\s)', r',\1', text)
-    # strip leading/trailing whitespace
-    return text.strip()
-
-# --- Load API key ---
-load_dotenv()
-API_KEY = os.getenv("GROQ_API_KEY")
-if not API_KEY:
-    raise ValueError("GROQ_API_KEY not found in .env file")
-
-# --- Setup Groq client ---
-client = Groq(api_key=API_KEY)
-MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-
-# --- Setup Piper TTS (loaded once at startup) ---
-print("Loading Piper voice model...")
-VOICE = PiperVoice.load(
-    "voices/en_US-ljspeech-high.onnx",
-    config_path="voices/en_US-ljspeech-high.onnx.json"
-)
-print("✅ Voice model loaded")
+from image_handler import capture_screen, image_changed, load_image, find_images
+from backends import load_backend
+from tts import load_tts
+from benchmark import measure_latency
 
 
-# --- State ---
-state = {
-    "mode": "short",
-    "slow": False,
-    "running": True,
-    "last_caption": None,
-    "last_image_hash": None,
-    "auto": False,
-}
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────
-# CORE FUNCTIONS
-# ─────────────────────────────────────────
-
-def speak(text):
-    """Speak text using preloaded Piper TTS voice."""
-    if not text:
-        return
-    print(f"🔊 {text}")
-
-    try:
-        # write synthesized audio to a temp wav file
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            tmp_path = f.name
-            with wave.open(f, "wb") as wav_file:
-                # length_scale: 1.0 = normal, 1.3 = slower
-                length_scale = 1.3 if state["slow"] else 1.0
-                VOICE.synthesize(
-                    text,
-                    wav_file,
-                    length_scale=length_scale
-                )
-
-        # play with aplay (non-blocking check, clean output)
-        subprocess.run(
-            ["aplay", "-q", tmp_path],
-            check=True
-        )
-
-        # cleanup temp file
-        os.remove(tmp_path)
-
-    except Exception as e:
-        print(f"⚠️ TTS error: {e}")
-
-def capture_screen():
-    """Capture full screen and return as PIL Image."""
-    with mss.mss() as sct:
-        monitor = sct.monitors[0]
-        screenshot = sct.grab(monitor)
-        img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
-        return img
-
-
-def image_hash(img):
-    """Simple hash to detect screen changes."""
-    small = img.resize((32, 32)).convert("L")
-    return hash(small.tobytes())
-
-
-def image_to_base64(img):
-    """Convert PIL image to base64 string for Groq API."""
-    # resize if too large — keeps API calls fast
-    max_size = (1280, 720)
-    img.thumbnail(max_size, Image.LANCZOS)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=85)
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-
-def describe_image(img, mode="short"):
-    """Send image to Groq and get description."""
-    if mode == "short":
-        prompt = "Describe this image in one or two sentences."
-    else:
-        prompt = (
-            "Describe this image in detail. "
-            "Include the main objects, any visible text or numbers, "
-            "colors, setting, and what is happening in the scene."
-        )
-
-    image_data = image_to_base64(img)
-
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_data}"
-                        }
-                    },
-                    {
-                        "type": "text",
-                        "text": prompt
-                    }
-                ]
-            }
-        ],
-        max_tokens=100 if mode == "short" else 300,
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Visual Assistant — AI screen description for visually impaired users."
     )
-
-    return response.choices[0].message.content.strip()
-
-
-def do_describe(delay=5):
-    """Capture screen after delay, describe it, and speak."""
-    if delay > 0:
-        print(f"⏱️ Capturing in {delay} seconds — switch to your window now...")
-        for i in range(delay, 0, -1):
-            print(f"  {i}...")
-            time.sleep(1)
-
-    print(">>>> Capturing screen...")
-    img = capture_screen()
-    label = "short" if state["mode"] == "short" else "detailed"
-    print(f">>>> Generating {label} description...")
-    try:
-        caption = describe_image(img, mode=state["mode"])
-        state["last_caption"] = caption
-        state["last_image_hash"] = image_hash(img)
-        print(f"\n>>>> → {caption}\n")
-        speak(caption)
-    except Exception as e:
-        print(f">>>> API error: {e}")
+    p.add_argument(
+        "--backend", choices=["groq", "local"], default="groq",
+        help="Vision backend: 'groq' (cloud, fast) or 'local' (offline LLaVA). Default: groq"
+    )
+    p.add_argument(
+        "--tts", choices=["piper", "gtts"], default="piper",
+        help="TTS engine: 'piper' (offline, Linux) or 'gtts' (online, cross-platform). Default: piper"
+    )
+    p.add_argument(
+        "--image", type=str, default=None,
+        help="Path to a single image file. If omitted, captures the screen."
+    )
+    p.add_argument(
+        "--benchmark", action="store_true",
+        help="Run latency benchmark and exit."
+    )
+    p.add_argument(
+        "--image-dir", type=str, default=".",
+        help="Image directory for --benchmark. Default: current directory."
+    )
+    return p.parse_args()
 
 
-def do_repeat():
-    """Repeat last caption."""
-    if state["last_caption"]:
-        print(f">>>> → {state['last_caption']}\n")
-        speak(state["last_caption"])
-    else:
-        print(">>>> Nothing to repeat yet.")
-
-
-def do_toggle_mode():
-    """Toggle between short and detailed mode."""
-    state["mode"] = "detailed" if state["mode"] == "short" else "short"
-    msg = f"Mode switched to {state['mode']}"
-    print(f">>>> {msg}")
-    speak(msg)
-
-
-def do_toggle_slow():
-    """Toggle slow/fast speech."""
-    state["slow"] = not state["slow"]
-    status = "slow" if state["slow"] else "normal"
-    msg = f"Speech speed set to {status}"
-    print(f">>>> {msg}")
-    speak(msg)
-
-
-def auto_watch(interval=5):
-    """
-    Continuously watch screen every interval seconds.
-    Only describes if screen has changed.
-    """
-    print(f">>>> Auto watch active — checking every {interval}s.")
-    print("Press Ctrl+C to stop auto watch.")
-    while state["auto"]:
-        try:
-            img = capture_screen()
-            current_hash = image_hash(img)
-
-            if current_hash != state["last_image_hash"]:
-                print("🔍 Screen change detected!")
-                try:
-                    caption = describe_image(img, mode=state["mode"])
-                    state["last_caption"] = caption
-                    state["last_image_hash"] = current_hash
-                    print(f"📝 → {caption}\n")
-                    speak(caption)
-                except Exception as e:
-                    print(f">>>> API error: {e}")
-            else:
-                print("⏸>>>> No change, skipping...")
-
-            time.sleep(interval)
-
-        except KeyboardInterrupt:
-            state["auto"] = False
-            print("\n>>>> Auto watch stopped.")
-            break
-
-
-# ─────────────────────────────────────────
-# MAIN LOOP
-# ─────────────────────────────────────────
+# ── UI ────────────────────────────────────────────────────────────────────────
 
 MENU = """
 ╔══════════════════════════════════════════════════╗
@@ -259,42 +75,141 @@ MENU = """
 ╚══════════════════════════════════════════════════╝
 """
 
-COMMANDS = {
-    'd': do_describe,
-    'r': do_repeat,
-    'm': do_toggle_mode,
-    'w': do_toggle_slow,
+BACKEND_INFO = {
+    "groq":  "☁️  Groq API  (Llama 4 Scout)",
+    "local": "🖥️  Local GPU (LLaVA-1.5-7b 4-bit)",
 }
 
-if __name__ == "__main__":
-    print(MENU)
-    speak("Visual Assistant ready. Press D to describe your screen.")
 
-    while state["running"]:
+# ── Main loop ─────────────────────────────────────────────────────────────────
+
+class VisualAssistant:
+    def __init__(self, backend, tts_engine, image_path: str | None = None):
+        self.backend      = backend
+        self.tts          = tts_engine
+        self.image_path   = image_path   # None → use screen capture
+        self.mode         = "short"      # 'short' | 'detailed'
+        self.last_caption = ""
+        self.auto_watch   = False
+        self._watch_thread: threading.Thread | None = None
+
+    # ── Actions ───────────────────────────────────────────────────────────
+
+    def _get_image(self):
+        if self.image_path:
+            return load_image(self.image_path)
+        return capture_screen(countdown=5)
+
+    def describe(self) -> None:
+        print(f"\n⏳ Capturing and describing ({self.mode} mode) …")
         try:
-            key = input("Command: ").strip().lower()
+            image   = self._get_image()
+            caption = self.backend.describe(image, mode=self.mode)
+            self.last_caption = caption
+            print(f"\n📝 {caption}\n")
+            self.tts.speak(caption)
+        except Exception as e:
+            print(f"❌ Error: {e}")
 
-            if not key:
-                continue
-            elif key == 'a':
-                do_toggle_auto = not state["auto"]
-                state["auto"] = do_toggle_auto
-                status = "ON" if state["auto"] else "OFF"
-                msg = f"Auto watch {status}"
-                print(f">>>> {msg}")
-                speak(msg)
-                if state["auto"]:
-                    auto_watch(interval=5)
-            elif key == 'q':
-                speak("Goodbye")
-                print(">>>> Goodbye!")
-                state["running"] = False
-            elif key in COMMANDS:
-                COMMANDS[key]()
-            else:
-                print(f">>>> Unknown command '{key}'. Valid: D, R, M, W, A, Q")
+    def repeat(self) -> None:
+        if not self.last_caption:
+            print("⚠️  No previous caption to repeat.")
+            return
+        print(f"\n📝 {self.last_caption}\n")
+        self.tts.speak(self.last_caption)
 
-        except KeyboardInterrupt:
-            speak("Goodbye")
-            print("\n>>>> Interrupted. Goodbye!")
-            break
+    def toggle_mode(self) -> None:
+        self.mode = "detailed" if self.mode == "short" else "short"
+        print(f"✅ Mode → {self.mode}")
+
+    def toggle_slow(self) -> None:
+        self.tts.slow = not self.tts.slow
+        speed = "slow" if self.tts.slow else "normal"
+        print(f"✅ Speech speed → {speed}")
+        self.tts.set_slow(self.tts.slow)
+
+    def toggle_auto_watch(self) -> None:
+        self.auto_watch = not self.auto_watch
+        if self.auto_watch:
+            print("✅ Auto-watch ON — will describe when screen changes (every 5s)")
+            self._watch_thread = threading.Thread(
+                target=self._watch_loop, daemon=True
+            )
+            self._watch_thread.start()
+        else:
+            print("✅ Auto-watch OFF")
+
+    def _watch_loop(self) -> None:
+        prev = capture_screen()
+        while self.auto_watch:
+            time.sleep(5)
+            if not self.auto_watch:
+                break
+            current = capture_screen()
+            if image_changed(prev, current):
+                print("\n🔄 Screen changed — describing …")
+                try:
+                    caption = self.backend.describe(current, mode=self.mode)
+                    self.last_caption = caption
+                    print(f"\n📝 {caption}\n")
+                    self.tts.speak(caption)
+                except Exception as e:
+                    print(f"❌ Error: {e}")
+                prev = current
+
+    # ── REPL ──────────────────────────────────────────────────────────────
+
+    def run(self) -> None:
+        print(MENU)
+        key_map = {
+            "d": self.describe,
+            "r": self.repeat,
+            "m": self.toggle_mode,
+            "w": self.toggle_slow,
+            "a": self.toggle_auto_watch,
+        }
+        while True:
+            try:
+                key = input("› ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\nGoodbye!")
+                sys.exit(0)
+
+            if key == "q":
+                print("Goodbye!")
+                sys.exit(0)
+            elif key in key_map:
+                key_map[key]()
+            elif key:
+                print(f"  Unknown key '{key}'. Use D/R/M/W/A/Q.")
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main() -> None:
+    args = parse_args()
+
+    print(f"\n🔧 Backend : {BACKEND_INFO.get(args.backend, args.backend)}")
+    print(f"🔧 TTS     : {args.tts}")
+    print(f"🔧 Mode    : short (toggle with M)\n")
+
+    backend = load_backend(args.backend)
+    tts     = load_tts(args.tts)
+
+    # ── Benchmark mode ────────────────────────────────────────────────────
+    if args.benchmark:
+        paths = find_images(args.image_dir)
+        if not paths:
+            print(f"No images found in '{args.image_dir}'.")
+            sys.exit(1)
+        print(f"Benchmarking {len(paths)} image(s) with {args.backend} backend …\n")
+        measure_latency(paths, backend)
+        return
+
+    # ── Interactive mode ──────────────────────────────────────────────────
+    assistant = VisualAssistant(backend, tts, image_path=args.image)
+    assistant.run()
+
+
+if __name__ == "__main__":
+    main()

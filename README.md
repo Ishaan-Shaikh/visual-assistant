@@ -1,86 +1,12 @@
-# Visual Assistant
+# 🦯 Visual Assistant
 
-A voice-guided screen description tool designed to help visually impaired users understand what is on their screen. It captures the screen, sends it to an AI vision model, and reads the description aloud using a local text-to-speech engine.
-
----
-
-## How It Works
-
-1. Captures a screenshot of your screen
-2. Sends it to **Llama 4 Scout** (via Groq API) for visual description
-3. Speaks the description aloud using **Piper TTS** (offline, runs locally)
+> AI-powered screen description tool for visually impaired users — with support for both **cloud** (Groq API) and **fully offline** (local GPU) vision backends.
 
 ---
 
-## Features
+## What it does
 
-- 🖥️ **Screen capture** — captures your full screen on demand
-- 🔍 **Short & detailed modes** — quick one-liner or full scene breakdown
-- 🔁 **Repeat** — replay the last description without a new API call
-- 🐢 **Slow speech mode** — slows down TTS for better clarity
-- 👁️ **Auto watch** — monitors screen every 5 seconds and speaks only when something changes
-- 🔒 **Privacy-friendly** — TTS runs fully offline via Piper
-
----
-
-## Requirements
-
-- Python 3.8+
-- Linux (uses `aplay` for audio playback)
-- A [Groq](https://console.groq.com) account and API key
-
----
-
-## Setup & Installation
-
-### 1. Clone the repository
-```bash
-git clone https://github.com/Ishaan-Shaikh/visual-assistant.git
-cd visual-assistant
-```
-
-### 2. Create and activate a virtual environment
-```bash
-python -m venv venv
-source venv/bin/activate
-```
-
-### 3. Install dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Download the Piper voice model
-
-Create a `voices/` folder and download the voice model files into it:
-
-```bash
-mkdir voices
-```
-
-Download these two files from [Piper's releases](https://github.com/rhasspy/piper/releases) and place them in the `voices/` folder:
-- `en_US-ljspeech-high.onnx`
-- `en_US-ljspeech-high.onnx.json`
-
-### 5. Set up environment variables
-
-Create a `.env` file in the project root:
-```
-GROQ_API_KEY=your_groq_api_key_here
-```
-
-Get your free API key at [console.groq.com](https://console.groq.com).
-
-### 6. Run the assistant
-```bash
-python visual_assistant.py
-```
-
----
-
-## Usage
-
-Once running, you will see this menu:
+Visual Assistant captures your screen (or any image), generates a natural language description using an AI vision model, and reads it aloud. Designed to help visually impaired users understand what's on their screen with a simple keyboard-driven interface.
 
 ```
 ╔══════════════════════════════════════════════════╗
@@ -95,47 +21,173 @@ Once running, you will see this menu:
 ╚══════════════════════════════════════════════════╝
 ```
 
-| Key | Action |
-|-----|--------|
-| `D` | Capture and describe the current screen |
-| `R` | Repeat the last description |
-| `M` | Toggle between short and detailed description |
-| `W` | Toggle between normal and slow speech speed |
-| `A` | Start/stop auto watch mode |
-| `Q` | Quit the program |
+---
 
-> **Tip:** When you press `D`, you get a 5-second countdown so you can switch to the window you want described.
+## Two backends, one interface
+
+| | ☁️ Groq (cloud) | 🖥️ Local (LLaVA) |
+|---|---|---|
+| **Model** | Llama 4 Scout | LLaVA-1.5-7b |
+| **Speed** | ~1–2s | ~17–21s |
+| **Internet** | Required | Not required after download |
+| **GPU** | Not required | ~6 GB VRAM |
+| **API key** | Required | Not required |
+| **Best for** | Daily use | Privacy, offline, research |
 
 ---
 
-## Project Structure
+## Features
+
+- 🖥️ **Screen capture** — captures your full screen on demand
+- 🖼️ **Image file mode** — describe any image file with `--image`
+- 🔍 **Short & detailed modes** — quick one-liner or full scene breakdown
+- 🔁 **Repeat** — replay the last description without a new API call
+- 🐢 **Slow speech mode** — slows down TTS for better clarity
+- 👁️ **Auto-watch** — monitors screen every 5 seconds, speaks only when something changes
+- 🔒 **Privacy-friendly** — Piper TTS runs fully offline; local backend needs no internet at all
+- 📊 **Benchmarking** — measure and compare backend latency on your hardware
+
+---
+
+## Project structure
 
 ```
 visual-assistant/
 │
-├── visual_assistant.py     # Main application
-├── requirements.txt        # Python dependencies
-├── .env                    # Your API key (not tracked by git)
-├── .env.example            # Example env file (safe to share)
-└── voices/                 # Piper TTS model files (not tracked by git)
-    ├── en_US-ljspeech-high.onnx
-    └── en_US-ljspeech-high.onnx.json
+├── backends/
+│   ├── __init__.py          # Factory: load_backend('groq' | 'local')
+│   ├── base.py              # Abstract BaseBackend interface
+│   ├── groq_backend.py      # ☁️  Groq API + Llama 4 Scout
+│   └── llava_backend.py     # 🖥️  LLaVA-1.5-7b, 4-bit NF4 quantized
+│
+├── tts/
+│   ├── __init__.py          # Factory: load_tts('piper' | 'gtts')
+│   ├── piper_tts.py         # Offline TTS (Piper, high quality, Linux)
+│   └── gtts_speaker.py      # Online TTS fallback (gTTS, cross-platform)
+│
+├── visual_assistant.py      # Main app & interactive REPL
+├── image_handler.py         # Screen capture, image loading, change detection
+├── benchmark.py             # Latency measurement for any backend
+│
+├── requirements.txt         # Core + Groq deps
+├── requirements-local.txt   # Extra deps for --backend local
+├── .env.example             # API key template
+└── final_FYP.ipynb          # Original research notebook (Colab)
 ```
+
+---
+
+## Setup
+
+### 1. Clone the repo
+
+```bash
+git clone https://github.com/Ishaan-Shaikh/visual-assistant.git
+cd visual-assistant
+```
+
+### 2. Create a virtual environment
+
+```bash
+python -m venv venv
+source venv/bin/activate        # Linux/macOS
+# venv\Scripts\activate         # Windows
+```
+
+### 3. Install dependencies
+
+**For the Groq (cloud) backend:**
+```bash
+pip install -r requirements.txt
+```
+
+**For the local LLaVA backend (needs CUDA GPU):**
+```bash
+pip install -r requirements.txt
+pip install -r requirements-local.txt
+```
+
+### 4. Set up Piper TTS (for offline speech)
+
+```bash
+pip install piper-tts
+mkdir voices
+```
+
+Download these two files from [Piper releases](https://github.com/rhasspy/piper/releases) into `voices/`:
+- `en_US-ljspeech-high.onnx`
+- `en_US-ljspeech-high.onnx.json`
+
+> **Alternative:** Use `--tts gtts` to skip Piper and use Google TTS instead (requires internet).
+
+### 5. Add your Groq API key (cloud backend only)
+
+```bash
+cp .env.example .env
+# Edit .env and add your key from https://console.groq.com
+```
+
+---
+
+## Usage
+
+### Interactive screen description (cloud)
+```bash
+python visual_assistant.py --backend groq
+```
+
+### Interactive screen description (offline)
+```bash
+python visual_assistant.py --backend local
+```
+
+### Describe a specific image file
+```bash
+python visual_assistant.py --backend groq --image photo.jpg
+python visual_assistant.py --backend local --image photo.jpg --tts gtts
+```
+
+### Use gTTS instead of Piper
+```bash
+python visual_assistant.py --backend groq --tts gtts
+```
+
+### Benchmark backend speed on your images
+```bash
+python visual_assistant.py --backend local --benchmark --image-dir ./images
+```
+
+---
+
+## Benchmark results
+
+> Tested on Google Colab T4 GPU (local backend) and Groq free tier (cloud backend).
+
+| Metric | Groq (cloud) | LLaVA local |
+|--------|-------------|-------------|
+| Mean   | ~1.5s       | ~19s        |
+| Min    | ~1.1s       | ~17s        |
+| Max    | ~2.0s       | ~21s        |
+
+*256 max new tokens, detailed mode. Your results will vary by hardware and network.*
 
 ---
 
 ## Dependencies
 
 | Library | Purpose |
-|--------|---------|
-| `groq` | Groq API client for Llama 4 vision model |
-| `piper-tts` | Offline text-to-speech engine |
+|---------|---------|
+| `groq` | Groq API client (cloud backend) |
+| `transformers` | LLaVA model loading (local backend) |
+| `bitsandbytes` | 4-bit NF4 quantization (local backend) |
+| `piper-tts` | Offline speech synthesis |
+| `gTTS` | Online TTS fallback |
 | `mss` | Fast cross-platform screen capture |
-| `Pillow` | Image processing and resizing |
-| `python-dotenv` | Load API key from `.env` file |
+| `Pillow` | Image processing |
+| `python-dotenv` | Load API key from `.env` |
 
 ---
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+MIT
